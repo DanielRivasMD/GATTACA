@@ -1,3 +1,5 @@
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use csv::{ReaderBuilder, WriterBuilder};
@@ -5,6 +7,8 @@ use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Parser)]
 #[command(author, version, about = "Concatenate ancient and modern quality files", long_about = None)]
@@ -24,6 +28,52 @@ struct Args {
     #[arg(short, long, default_value_t = 42)]
     seed: u64,
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+fn read_quality_file(path: &str) -> Result<(Vec<Vec<String>>, Vec<String>)> {
+    let file = File::open(path).context(format!("Cannot open file: {}", path))?;
+    let buf = BufReader::new(file);
+    let mut rdr = ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_reader(buf);
+
+    let headers = rdr
+        .headers()?
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    if headers.len() < 3 {
+        anyhow::bail!("File {} has fewer than 3 columns", path);
+    }
+
+    let mut records = Vec::new();
+    for result in rdr.records() {
+        let record = result?;
+        let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+        records.push(fields[2..].to_vec());
+    }
+    Ok((records, headers))
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+fn sample_records(records: &[Vec<String>], k: usize, rng: &mut ChaCha8Rng) -> Vec<Vec<String>> {
+    if k >= records.len() {
+        return records.to_vec();
+    }
+    let mut indices: Vec<usize> = (0..k).collect();
+    for i in k..records.len() {
+        let j = rng.gen_range(0..=i);
+        if j < k {
+            indices[j] = i;
+        }
+    }
+    indices.iter().map(|&idx| records[idx].clone()).collect()
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -49,11 +99,16 @@ fn main() -> Result<()> {
         .from_writer(buf_out);
 
     // Write header: per‑position columns + "label"
-    let mut header = (1..=n_cols).map(|i| format!("col{}", i)).collect::<Vec<_>>();
+    let mut header = (1..=n_cols)
+        .map(|i| format!("col{}", i))
+        .collect::<Vec<_>>();
     header.push("label".to_string());
     wtr.write_record(&header)?;
 
-    let write_records = |records: &[Vec<String>], label: u8, wtr: &mut csv::Writer<BufWriter<File>>| -> Result<()> {
+    let write_records = |records: &[Vec<String>],
+                         label: u8,
+                         wtr: &mut csv::Writer<BufWriter<File>>|
+     -> Result<()> {
         for rec in records {
             let mut row = rec.clone();
             row.push(label.to_string());
@@ -91,38 +146,4 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn read_quality_file(path: &str) -> Result<(Vec<Vec<String>>, Vec<String>)> {
-    let file = File::open(path).context(format!("Cannot open file: {}", path))?;
-    let buf = BufReader::new(file);
-    let mut rdr = ReaderBuilder::new()
-        .delimiter(b'\t')
-        .has_headers(true)
-        .from_reader(buf);
-
-    let headers = rdr.headers()?.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    if headers.len() < 3 {
-        anyhow::bail!("File {} has fewer than 3 columns", path);
-    }
-
-    let mut records = Vec::new();
-    for result in rdr.records() {
-        let record = result?;
-        let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
-        records.push(fields[2..].to_vec());
-    }
-    Ok((records, headers))
-}
-
-fn sample_records(records: &[Vec<String>], k: usize, rng: &mut ChaCha8Rng) -> Vec<Vec<String>> {
-    if k >= records.len() {
-        return records.to_vec();
-    }
-    let mut indices: Vec<usize> = (0..k).collect();
-    for i in k..records.len() {
-        let j = rng.gen_range(0..=i);
-        if j < k {
-            indices[j] = i;
-        }
-    }
-    indices.iter().map(|&idx| records[idx].clone()).collect()
-}
+////////////////////////////////////////////////////////////////////////////////////////////////////
