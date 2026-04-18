@@ -1,9 +1,19 @@
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+const BAM_DIR: &str = "data/bam";
+const FASTA_DIR: &str = "data/fasta";
+const SAMPLES: [&str; 2] = ["simulation_ancient", "simulation_modern"];
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Parser)]
 #[command(author, version, about = "Convert BAM to FASTA using samtools + seqtk", long_about = None)]
@@ -12,14 +22,14 @@ struct Args {
     mode: String,
 }
 
-const BAM_DIR: &str = "data/bam";
-const FASTA_DIR: &str = "data/fasta";
-const SAMPLES: [&str; 2] = ["simulation_ancient", "simulation_modern"];
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 fn is_canonical_chrom(chrom: &str) -> bool {
     let re = Regex::new(r"^chr([0-9]+|X|Y|M)$").unwrap();
     re.is_match(chrom)
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// Run a pipeline of commands, writing final stdout to a file.
 fn run_pipeline(commands: Vec<(&str, Vec<&str>)>, output_path: &Path) -> Result<()> {
@@ -29,8 +39,16 @@ fn run_pipeline(commands: Vec<(&str, Vec<&str>)>, output_path: &Path) -> Result<
     for (i, (cmd, args)) in commands.iter().enumerate() {
         let mut child = Command::new(cmd)
             .args(args)
-            .stdin(if i == 0 { Stdio::null() } else { Stdio::from(prev_stdout.take().unwrap()) })
-            .stdout(if i == commands.len() - 1 { Stdio::piped() } else { Stdio::piped() })
+            .stdin(if i == 0 {
+                Stdio::null()
+            } else {
+                Stdio::from(prev_stdout.take().unwrap())
+            })
+            .stdout(if i == commands.len() - 1 {
+                Stdio::piped()
+            } else {
+                Stdio::piped()
+            })
             .stderr(Stdio::inherit())
             .spawn()
             .with_context(|| format!("Failed to spawn {}", cmd))?;
@@ -42,8 +60,7 @@ fn run_pipeline(commands: Vec<(&str, Vec<&str>)>, output_path: &Path) -> Result<
                 .with_context(|| format!("Cannot create {}", output_path.display()))?;
             let stdout = child.stdout.take().context("No stdout from last command")?;
             let mut reader = stdout;
-            std::io::copy(&mut reader, &mut out_file)
-                .context("Failed to write output to file")?;
+            std::io::copy(&mut reader, &mut out_file).context("Failed to write output to file")?;
         }
         children.push(child);
     }
@@ -57,14 +74,21 @@ fn run_pipeline(commands: Vec<(&str, Vec<&str>)>, output_path: &Path) -> Result<
     Ok(())
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 fn convert_whole_bam(bam_path: &Path, output_fasta: &Path) -> Result<()> {
-    println!("Converting whole genome for {:?}", bam_path.file_name().unwrap());
+    println!(
+        "Converting whole genome for {:?}",
+        bam_path.file_name().unwrap()
+    );
     let commands = vec![
         ("samtools", vec!["fastq", bam_path.to_str().unwrap()]),
         ("seqtk", vec!["seq", "-A"]),
     ];
     run_pipeline(commands, output_fasta)
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 fn convert_per_chrom(bam_path: &Path, sample_name: &str) -> Result<()> {
     println!("Converting per chromosome for {}", sample_name);
@@ -99,7 +123,10 @@ fn convert_per_chrom(bam_path: &Path, sample_name: &str) -> Result<()> {
         println!("  Extracting {}...", chrom);
         let output_fasta = Path::new(FASTA_DIR).join(format!("{}_{}.fasta", sample_name, chrom));
         let commands = vec![
-            ("samtools", vec!["view", "-b", bam_path.to_str().unwrap(), chrom]),
+            (
+                "samtools",
+                vec!["view", "-b", bam_path.to_str().unwrap(), chrom],
+            ),
             ("samtools", vec!["fastq", "-"]),
             ("seqtk", vec!["seq", "-A"]),
         ];
@@ -108,13 +135,20 @@ fn convert_per_chrom(bam_path: &Path, sample_name: &str) -> Result<()> {
     Ok(())
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
     fs::create_dir_all(FASTA_DIR).context("Failed to create fasta directory")?;
 
     for tool in ["samtools", "seqtk"] {
-        if let Err(e) = Command::new(tool).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status() {
+        if let Err(e) = Command::new(tool)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
             eprintln!("Error: {} not found in PATH: {}", tool, e);
             std::process::exit(1);
         }
@@ -141,3 +175,5 @@ fn main() -> Result<()> {
     println!("Conversion complete: FASTA files written to {}", FASTA_DIR);
     Ok(())
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
