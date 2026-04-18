@@ -1,17 +1,19 @@
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use csv::{ReaderBuilder, WriterBuilder};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Serialize;
 use std::path::PathBuf;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // All 16 possible dimers in a fixed order
 const DIMERS: [&str; 16] = [
-    "AA", "AC", "AG", "AT",
-    "CA", "CC", "CG", "CT",
-    "GA", "GC", "GG", "GT",
-    "TA", "TC", "TG", "TT",
+    "AA", "AC", "AG", "AT", "CA", "CC", "CG", "CT", "GA", "GC", "GG", "GT", "TA", "TC", "TG", "TT",
 ];
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Serialize)]
 struct DimerRow {
@@ -34,6 +36,8 @@ struct DimerRow {
     TT: usize,
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 #[derive(Parser)]
 #[command(author, version, about = "Count dimers in DNA sequences from a TSV file (first column = sequence)", long_about = None)]
 struct Args {
@@ -43,6 +47,8 @@ struct Args {
     /// Output CSV file (with dimer counts)
     output: PathBuf,
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 fn count_dimers(seq: &str) -> [usize; 16] {
     let mut counts = [0; 16];
@@ -72,6 +78,8 @@ fn count_dimers(seq: &str) -> [usize; 16] {
     counts
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -80,7 +88,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to open input file: {:?}", args.input))?;
     let mut rdr = ReaderBuilder::new()
         .delimiter(b'\t')
-        .has_headers(false)   // assume no header, first column is sequence
+        .has_headers(false) // assume no header, first column is sequence
         .from_reader(file);
 
     // Prepare output CSV writer
@@ -106,18 +114,42 @@ fn main() -> Result<()> {
         // Build row
         let mut row = DimerRow {
             sequence: seq,
-            AA: 0, AC: 0, AG: 0, AT: 0,
-            CA: 0, CC: 0, CG: 0, CT: 0,
-            GA: 0, GC: 0, GG: 0, GT: 0,
-            TA: 0, TC: 0, TG: 0, TT: 0,
+            AA: 0,
+            AC: 0,
+            AG: 0,
+            AT: 0,
+            CA: 0,
+            CC: 0,
+            CG: 0,
+            CT: 0,
+            GA: 0,
+            GC: 0,
+            GG: 0,
+            GT: 0,
+            TA: 0,
+            TC: 0,
+            TG: 0,
+            TT: 0,
         };
         // Assign counts in order
         for (i, &dimer) in DIMERS.iter().enumerate() {
             let field = match dimer {
-                "AA" => &mut row.AA, "AC" => &mut row.AC, "AG" => &mut row.AG, "AT" => &mut row.AT,
-                "CA" => &mut row.CA, "CC" => &mut row.CC, "CG" => &mut row.CG, "CT" => &mut row.CT,
-                "GA" => &mut row.GA, "GC" => &mut row.GC, "GG" => &mut row.GG, "GT" => &mut row.GT,
-                "TA" => &mut row.TA, "TC" => &mut row.TC, "TG" => &mut row.TG, "TT" => &mut row.TT,
+                "AA" => &mut row.AA,
+                "AC" => &mut row.AC,
+                "AG" => &mut row.AG,
+                "AT" => &mut row.AT,
+                "CA" => &mut row.CA,
+                "CC" => &mut row.CC,
+                "CG" => &mut row.CG,
+                "CT" => &mut row.CT,
+                "GA" => &mut row.GA,
+                "GC" => &mut row.GC,
+                "GG" => &mut row.GG,
+                "GT" => &mut row.GT,
+                "TA" => &mut row.TA,
+                "TC" => &mut row.TC,
+                "TG" => &mut row.TG,
+                "TT" => &mut row.TT,
                 _ => unreachable!(),
             };
             *field = counts[i];
@@ -129,3 +161,5 @@ fn main() -> Result<()> {
     println!("Dimer counts written to {}", args.output.display());
     Ok(())
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
