@@ -11,40 +11,6 @@ use gattaca::reservoir_sample_iter;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Detect Phred encoding offset from a sample of quality strings
-/// Returns `Some(33)` if all observed bytes are in [33, 93]
-/// Returns `Some(64)` if all observed bytes are in [64, 124]
-/// Returns `None` otherwise
-fn detect_encoding(qual_strings: &[&str]) -> Option<u8> {
-    if qual_strings.is_empty() {
-        return None;
-    }
-
-    let mut min_byte = 255u8;
-    let mut max_byte = 0u8;
-
-    for q in qual_strings {
-        for &b in q.as_bytes() {
-            if b < min_byte {
-                min_byte = b;
-            }
-            if b > max_byte {
-                max_byte = b;
-            }
-        }
-    }
-
-    if min_byte >= 33 && max_byte <= 93 {
-        Some(33)
-    } else if min_byte >= 64 && max_byte <= 124 {
-        Some(64)
-    } else {
-        None
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 #[derive(Parser)]
 #[command(author, version, about = "Extract per‑position Phred scores from SAM stdin")]
 struct Args {
@@ -81,6 +47,40 @@ struct Args {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+/// Detect Phred encoding offset from a sample of quality strings
+/// Returns `Some(33)` if all observed bytes are in [33, 93]
+/// Returns `Some(64)` if all observed bytes are in [64, 124]
+/// Returns `None` otherwise
+fn detect_encoding(qual_strings: &[&str]) -> Option<u8> {
+    if qual_strings.is_empty() {
+        return None;
+    }
+
+    let mut min_byte = 255u8;
+    let mut max_byte = 0u8;
+
+    for q in qual_strings {
+        for &b in q.as_bytes() {
+            if b < min_byte {
+                min_byte = b;
+            }
+            if b > max_byte {
+                max_byte = b;
+            }
+        }
+    }
+
+    if min_byte >= 33 && max_byte <= 93 {
+        Some(33)
+    } else if min_byte >= 64 && max_byte <= 124 {
+        Some(64)
+    } else {
+        None
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let l = args.length;
@@ -102,7 +102,6 @@ fn main() -> Result<()> {
         detection_buffer.push(line);
     }
 
-    // Extract quality strings from the buffered lines for detection.
     for line in &detection_buffer {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() >= 11 {
@@ -114,7 +113,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // Determine offset.
     let offset = if let Some(forced) = args.phred {
         forced
     } else {
@@ -139,7 +137,6 @@ fn main() -> Result<()> {
         Box::new(BufWriter::new(io::stdout()))
     };
 
-    // Write header: seq, qual, then positions 1..l
     write!(out, "seq\tqual")?;
     for i in 1..=l {
         write!(out, "\t{}", i)?;
@@ -159,11 +156,9 @@ fn main() -> Result<()> {
             .map(Ok::<_, io::Error>)
             .chain(reader.lines());
 
-        // Reservoir sampling over the entire stream
         let selected: Vec<String> =
             reservoir_sample_iter(all_lines_iter.filter_map(Result::ok), k, &mut rng);
 
-        // Output selected reads
         for line in selected {
             let fields: Vec<&str> = line.split('\t').collect();
             if fields.len() < 11 {
