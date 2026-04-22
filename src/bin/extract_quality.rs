@@ -46,7 +46,7 @@ fn detect_encoding(qual_strings: &[&str]) -> Option<u8> {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Parser)]
-#[command(author, version, about = "Extract per‑position Phred scores from SAM stdin", long_about = None)]
+#[command(author, version, about = "Extract per‑position Phred scores from SAM stdin")]
 struct Args {
     /// Read length to filter (reads of other lengths are discarded)
     #[arg(short, long, default_value_t = 76)]
