@@ -1,2 +1,8 @@
+update author & versioning for each tool
+utilize process substitution with read_length & extract_quality
+consolidate extract_quality with concatenate_quality to form a single tool that extracts from 2 files
+
+
+
 ==================================================
 ==================================================
