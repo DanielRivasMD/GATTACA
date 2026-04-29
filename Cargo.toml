@@ -14,10 +14,6 @@ name = "extract_quality"
 path = "src/bin/extract_quality.rs"
 
 [[bin]]
-name = "cat_quality"
-path = "src/bin/cat_quality.rs"
-
-[[bin]]
 name = "bam2fasta"
 path = "src/bin/bam2fasta.rs"
 
