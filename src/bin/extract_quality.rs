@@ -1,36 +1,58 @@
+// src/bin/extract_quality.rs
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use std::fs::File;
-use std::io::{self, BufRead, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter};
 
 use gattaca::reservoir_sample_iter;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Parser)]
-#[command(author, version, about = "Extract per‑position Phred scores from SAM stdin")]
+#[command(
+    author,
+    version,
+    about = "Extract per‑position Phred scores from SAM inputs",
+    long_about = "Read SAM files (or pipes from process substitution) for ancient and modern samples,\n\
+                  extract per‑position quality scores, concatenate them, and output a CSV with\n\
+                  columns: 1..L, label (0=ancient, 1=modern). Optionally balance classes by\n\
+                  downsampling the majority class\n\
+                  \n\
+                  Example:\n\
+                  extract_quality --ancient <(samtools view a1.bam) <(samtools view a2.bam)\n\
+                                  --modern <(samtools view m1.bam)\n\
+                                  --balance ancient --output out.csv"
+)]
 struct Args {
+    /// Ancient SAM input files (or process substitution pipes)
+    #[arg(short, long, required = true, num_args = 1.., value_name = "FILE")]
+    ancient: Vec<String>,
+
+    /// Modern SAM input files (or process substitution pipes)
+    #[arg(short, long, required = true, num_args = 1.., value_name = "FILE")]
+    modern: Vec<String>,
+
+    /// Output CSV file
+    #[arg(short, long, required = true)]
+    output: String,
+
+    /// Balance classes: 'ancient' downsamples modern to ancient size, 'modern' downsamples ancient to modern size
+    #[arg(long, value_parser = ["ancient", "modern"])]
+    balance: Option<String>,
+
+    /// Random seed for reproducible downsampling
+    #[arg(short, long, default_value_t = 42)]
+    seed: u64,
+
     /// Read length to filter (reads of other lengths are discarded)
     #[arg(short, long, default_value_t = 76)]
     length: usize,
 
-    /// Random sample size (if omitted, process all reads)
-    #[arg(short, long)]
-    sample: Option<usize>,
-
-    /// Random seed (for reproducible sampling)
-    #[arg(short, long, default_value_t = 42)]
-    seed: u64,
-
-    /// Output file path (if omitted, writes to stdout)
-    #[arg(short, long)]
-    output: Option<String>,
-
-    /// Force Phred encoding (33 or 64). Overrides auto‑detection.
+    /// Force Phred encoding (33 or 64). Overrides auto‑detection
     #[arg(long, value_parser = |s: &str| -> Result<u8, String> {
         match s {
             "33" => Ok(33),
@@ -42,23 +64,18 @@ struct Args {
 
     /// Number of lines to scan for encoding auto‑detection
     #[arg(long, default_value_t = 10000)]
-    detect_lines: usize,
+    detect_encoding: usize,
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// Detect Phred encoding offset from a sample of quality strings
-/// Returns `Some(33)` if all observed bytes are in [33, 93]
-/// Returns `Some(64)` if all observed bytes are in [64, 124]
-/// Returns `None` otherwise
 fn detect_encoding(qual_strings: &[&str]) -> Option<u8> {
     if qual_strings.is_empty() {
         return None;
     }
-
     let mut min_byte = 255u8;
     let mut max_byte = 0u8;
-
     for q in qual_strings {
         for &b in q.as_bytes() {
             if b < min_byte {
@@ -69,7 +86,6 @@ fn detect_encoding(qual_strings: &[&str]) -> Option<u8> {
             }
         }
     }
-
     if min_byte >= 33 && max_byte <= 93 {
         Some(33)
     } else if min_byte >= 64 && max_byte <= 124 {
@@ -81,42 +97,67 @@ fn detect_encoding(qual_strings: &[&str]) -> Option<u8> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+/// Parse a SAM line and return Some(quality_bytes) if valid, else None
+fn valid_sam_line(line: &str, read_len: usize) -> Option<&[u8]> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() < 11 {
+        return None;
+    }
+    let seq = fields[9];
+    let qual = fields[10];
+    if seq.len() == read_len && qual.len() == read_len {
+        Some(qual.as_bytes())
+    } else {
+        None
+    }
+}
+
+/// Convert a quality byte slice to a vector of per‑position scores as strings (offset applied)
+fn scores_to_strings(qual_bytes: &[u8], offset: u8) -> Vec<String> {
+    qual_bytes
+        .iter()
+        .map(|&b| (b.saturating_sub(offset)).to_string())
+        .collect()
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let l = args.length;
-    let sample_size = args.sample;
 
-    let stdin = io::stdin();
-    let mut reader = io::BufReader::new(stdin.lock());
-
-    // 1. Read a sample of lines for encoding detection
-    let mut detection_buffer = Vec::new();
-    let mut qual_samples = Vec::new();
-
-    for _ in 0..args.detect_lines {
+    // 1. Phred offset detection (from first ancient file)
+    if args.ancient.is_empty() {
+        bail!("At least one --ancient input is required.");
+    }
+    let first_ancient = &args.ancient[0];
+    // Open first ancient file and read detection buffer
+    let file = if first_ancient == "-" {
+        bail!("Cannot use stdin with multiple inputs; provide files or pipes.");
+    } else {
+        File::open(first_ancient)
+            .with_context(|| format!("Cannot open ancient file: {}", first_ancient))?
+    };
+    let mut reader = BufReader::new(file);
+    let mut detection_buffer: Vec<String> = Vec::new();
+    let mut qual_samples: Vec<String> = Vec::new();
+    for _ in 0..args.detect_encoding {
         let mut line = String::new();
-        let bytes_read = reader.read_line(&mut line)?;
-        if bytes_read == 0 {
-            break; // EOF
+        if reader.read_line(&mut line)? == 0 {
+            break;
         }
         detection_buffer.push(line);
     }
-
     for line in &detection_buffer {
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() >= 11 {
-            let seq = fields[9];
-            let qual = fields[10];
-            if seq.len() == l && qual.len() == l {
-                qual_samples.push(qual);
-            }
+        if let Some(qual_bytes) = valid_sam_line(line, l) {
+            qual_samples.push(std::str::from_utf8(qual_bytes).unwrap().to_string());
         }
     }
 
     let offset = if let Some(forced) = args.phred {
         forced
     } else {
-        match detect_encoding(&qual_samples) {
+        match detect_encoding(&qual_samples.iter().map(|s| s.as_str()).collect::<Vec<_>>()) {
             Some(offset) => offset,
             None => {
                 eprintln!(
@@ -128,97 +169,183 @@ fn main() -> Result<()> {
         }
     };
 
-    // 2. Prepare output writer
-    let mut out: Box<dyn Write> = if let Some(path) = args.output {
-        let file =
-            File::create(&path).with_context(|| format!("Cannot create output file: {}", path))?;
-        Box::new(BufWriter::new(file))
-    } else {
-        Box::new(BufWriter::new(io::stdout()))
+    // 2. Row counting for ancient and modern
+    let count_ancient = count_class_rows(&args.ancient, l)?;
+    let count_modern = count_class_rows(&args.modern, l)?;
+
+    eprintln!(
+        "Ancient rows: {}, Modern rows: {}",
+        count_ancient, count_modern
+    );
+
+    // Determine target sizes
+    let (target_ancient, target_modern) = match args.balance.as_deref() {
+        Some("ancient") => (count_ancient, count_ancient.min(count_modern)),
+        Some("modern") => (count_ancient.min(count_modern), count_modern),
+        _ => (count_ancient, count_modern),
     };
 
-    write!(out, "seq\tqual")?;
-    for i in 1..=l {
-        write!(out, "\t{}", i)?;
+    if target_ancient == 0 && target_modern == 0 {
+        eprintln!("No reads to process. Exiting.");
+        return Ok(());
     }
-    writeln!(out)?;
 
-    // 3. Process lines
+    // 3. Output CSV setup
+    let out_file = File::create(&args.output)
+        .with_context(|| format!("Cannot create output file: {}", args.output))?;
+    let buf_out = BufWriter::new(out_file);
+    let mut wtr = csv::WriterBuilder::new()
+        .has_headers(true)
+        .delimiter(b',')
+        .from_writer(buf_out);
+
+    // Header: 1..l, label
+    let mut header: Vec<String> = (1..=l).map(|i| i.to_string()).collect();
+    header.push("label".to_string());
+    wtr.write_record(&header)?;
+
     let mut rng = ChaCha8Rng::seed_from_u64(args.seed);
 
-    if let Some(k) = sample_size {
-        if k == 0 {
-            return Ok(());
-        }
-
-        let all_lines_iter = detection_buffer
-            .into_iter()
-            .map(Ok::<_, io::Error>)
-            .chain(reader.lines());
-
-        let selected: Vec<String> =
-            reservoir_sample_iter(all_lines_iter.filter_map(Result::ok), k, &mut rng);
-
-        for line in selected {
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() < 11 {
-                continue;
-            }
-            let seq = fields[9];
-            let qual = fields[10];
-            if seq.len() != l || qual.len() != l {
-                continue;
-            }
-
-            write!(out, "{}\t{}", seq, qual)?;
-            for &b in qual.as_bytes() {
-                let score = b.saturating_sub(offset);
-                write!(out, "\t{}", score)?;
-            }
-            writeln!(out)?;
-        }
-    } else {
-        for line in detection_buffer {
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() < 11 {
-                continue;
-            }
-            let seq = fields[9];
-            let qual = fields[10];
-            if seq.len() != l || qual.len() != l {
-                continue;
-            }
-
-            write!(out, "{}\t{}", seq, qual)?;
-            for &b in qual.as_bytes() {
-                let score = b.saturating_sub(offset);
-                write!(out, "\t{}", score)?;
-            }
-            writeln!(out)?;
-        }
-
-        for line in reader.lines() {
-            let line = line.context("Failed to read line")?;
-            let fields: Vec<&str> = line.split('\t').collect();
-            if fields.len() < 11 {
-                continue;
-            }
-            let seq = fields[9];
-            let qual = fields[10];
-            if seq.len() != l || qual.len() != l {
-                continue;
-            }
-
-            write!(out, "{}\t{}", seq, qual)?;
-            for &b in qual.as_bytes() {
-                let score = b.saturating_sub(offset);
-                write!(out, "\t{}", score)?;
-            }
-            writeln!(out)?;
+    // 4. Write ancient class
+    if target_ancient > 0 {
+        if target_ancient == count_ancient {
+            // Stream all ancient rows directly
+            stream_class_rows(&args.ancient, l, offset, 0u8, &mut wtr, &detection_buffer)?;
+        } else {
+            // Downsample ancient to target_ancient
+            downsample_class_rows(
+                &args.ancient,
+                l,
+                offset,
+                target_ancient,
+                &mut rng,
+                0u8,
+                &mut wtr,
+                &detection_buffer,
+            )?;
         }
     }
 
-    out.flush()?;
+    // 5. Write modern class
+    if target_modern > 0 {
+        if target_modern == count_modern {
+            stream_class_rows(&args.modern, l, offset, 1u8, &mut wtr, &[])?;
+        } else {
+            downsample_class_rows(
+                &args.modern,
+                l,
+                offset,
+                target_modern,
+                &mut rng,
+                1u8,
+                &mut wtr,
+                &[],
+            )?;
+        }
+    }
+
+    wtr.flush()?;
+    eprintln!("Labelled dataset written to {}", args.output);
+    Ok(())
+}
+
+/// Count the number of valid reads (matching length) across multiple files
+fn count_class_rows(files: &[String], read_len: usize) -> Result<usize> {
+    let mut total = 0;
+    for file in files {
+        if file == "-" {
+            bail!("Stdin ('-') not supported as a class file.");
+        }
+        let f = File::open(file).with_context(|| format!("Cannot open file: {}", file))?;
+        let reader = BufReader::new(f);
+        for line in reader.lines() {
+            let line = line?;
+            if valid_sam_line(&line, read_len).is_some() {
+                total += 1;
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Stream all valid rows from a class, prepending a detection buffer before the first file
+fn stream_class_rows(
+    files: &[String],
+    read_len: usize,
+    offset: u8,
+    label: u8,
+    wtr: &mut csv::Writer<BufWriter<File>>,
+    detection_buffer: &[String],
+) -> Result<()> {
+    let mut first = true;
+    for file in files.iter() {
+        let reader = if file == "-" {
+            bail!("Stdin ('-') not supported.");
+        } else {
+            BufReader::new(File::open(file).context("Cannot open file")?)
+        };
+        let lines_iter: Box<dyn Iterator<Item = Result<String, io::Error>>> =
+            if first && !detection_buffer.is_empty() {
+                first = false;
+                let buffer_iter = detection_buffer.iter().cloned().map(Ok::<_, io::Error>);
+                let file_iter = reader.lines();
+                Box::new(buffer_iter.chain(file_iter))
+            } else {
+                Box::new(reader.lines())
+            };
+
+        for line in lines_iter {
+            let line = line?;
+            if let Some(qual_bytes) = valid_sam_line(&line, read_len) {
+                let row = scores_to_strings(qual_bytes, offset);
+                let mut record = row;
+                record.push(label.to_string());
+                wtr.write_record(&record)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Downsample a class to exactly `k` rows using reservoir sampling, then write
+fn downsample_class_rows(
+    files: &[String],
+    read_len: usize,
+    offset: u8,
+    k: usize,
+    rng: &mut impl Rng,
+    label: u8,
+    wtr: &mut csv::Writer<BufWriter<File>>,
+    detection_buffer: &[String],
+) -> Result<()> {
+    let mut iter: Box<dyn Iterator<Item = Vec<String>>> = Box::new(std::iter::empty());
+    // Build a combined iterator over files, prepending detection buffer before the first ancient file (if applicable)
+    let mut first = true;
+    for file in files.iter() {
+        let reader = BufReader::new(File::open(file).context("Cannot open file")?);
+        let lines_iter: Box<dyn Iterator<Item = Result<String, io::Error>>> =
+            if first && !detection_buffer.is_empty() {
+                first = false;
+                let buffer_iter = detection_buffer.iter().cloned().map(Ok::<_, io::Error>);
+                let file_iter = reader.lines();
+                Box::new(buffer_iter.chain(file_iter))
+            } else {
+                Box::new(reader.lines())
+            };
+        // Map valid lines to score vectors
+        let score_iter = lines_iter.filter_map(move |r| {
+            r.ok().and_then(|line| {
+                valid_sam_line(&line, read_len).map(|b| scores_to_strings(b, offset))
+            })
+        });
+        iter = Box::new(iter.chain(score_iter));
+    }
+
+    let sample = reservoir_sample_iter(iter, k, rng);
+    for mut row in sample {
+        row.push(label.to_string());
+        wtr.write_record(&row)?;
+    }
     Ok(())
 }
 
