@@ -33,7 +33,6 @@ struct Args {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Derive a human‑readable source label from the input argument
 fn source_label(input: &str) -> String {
     if input == "-" {
         "stdin".to_string()

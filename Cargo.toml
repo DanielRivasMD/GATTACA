@@ -14,16 +14,12 @@ name = "extract_quality"
 path = "src/bin/extract_quality.rs"
 
 [[bin]]
-name = "bam2fasta"
-path = "src/bin/bam2fasta.rs"
+name = "dimer_count"
+path = "src/bin/dimer_count.rs"
 
 [[bin]]
 name = "read_len"
 path = "src/bin/read_len.rs"
-
-[[bin]]
-name = "dimer_count"
-path = "src/bin/dimer_count.rs"
 
 [dependencies]
 anyhow = "1.0"
