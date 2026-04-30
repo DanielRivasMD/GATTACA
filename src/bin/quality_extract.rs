@@ -46,7 +46,7 @@ struct Args {
     seed: u64,
 
     /// Read length to filter, or 0 for padding mode (centred, -1 padded)
-    #[arg(short, long, default_value_t = 76)]
+    #[arg(short, long, default_value_t = 0)]
     length: usize,
 
     /// Force Phred encoding (33 or 64). Overrides auto‑detection
