@@ -20,9 +20,12 @@ use gattaca::reservoir_sample_iter;
                   Outputs a CSV with columns 1..L and a label (the 0‑based file index)\n\
                   Optionally balance by downsampling all other files to match a reference file\n\
                   \n\
+                  Padding mode (‑‑length 0): the longest read in the FIRST file defines L;\n\
+                  shorter reads are centred and padded with -1 quality values\n\
+                  \n\
                   Example:\n\
-                  extract_quality <(samtools view a.bam) <(samtools view m1.bam) <(samtools view m2.bam) \\\n\
-                                  --length 76 --balance 1 --output out.csv"
+                  extract_quality <(samtools view a.bam) <(samtools view m1.bam) \\\n\
+                                  --length 0 --balance 1 --output out.csv"
 )]
 struct Args {
     /// SAM input files (or process substitution pipes)
@@ -41,7 +44,7 @@ struct Args {
     #[arg(short, long, default_value_t = 42)]
     seed: u64,
 
-    /// Read length to filter (reads of other lengths are discarded)
+    /// Read length to filter, or 0 for padding mode (centred, -1 padded)
     #[arg(short, long, default_value_t = 76)]
     length: usize,
 
@@ -87,7 +90,7 @@ fn detect_encoding(qual_strings: &[&str]) -> Option<u8> {
     }
 }
 
-fn valid_sam_line(line: &str, read_len: usize) -> Option<&[u8]> {
+fn valid_sam_line_strict(line: &str, read_len: usize) -> Option<&[u8]> {
     let fields: Vec<&str> = line.split('\t').collect();
     if fields.len() < 11 {
         return None;
@@ -101,53 +104,87 @@ fn valid_sam_line(line: &str, read_len: usize) -> Option<&[u8]> {
     }
 }
 
-fn scores_to_strings(qual_bytes: &[u8], offset: u8) -> Vec<String> {
-    qual_bytes
-        .iter()
-        .map(|&b| (b.saturating_sub(offset)).to_string())
-        .collect()
+fn valid_sam_line_padding(line: &str) -> Option<(usize, &[u8])> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() < 11 {
+        return None;
+    }
+    let seq = fields[9];
+    let qual = fields[10];
+    if seq.is_empty() || qual.len() != seq.len() {
+        return None;
+    }
+    Some((seq.len(), qual.as_bytes()))
 }
 
-fn score_iterator(
+fn score_str(byte: u8, offset: u8) -> String {
+    (byte.saturating_sub(offset)).to_string()
+}
+
+fn pad_row(qual: &[u8], seq_len: usize, max_len: usize, offset: u8) -> Vec<String> {
+    let left = seq_len / 2;
+    let right = seq_len - left;
+    let pad_count = max_len - seq_len;
+
+    let mut row = Vec::with_capacity(max_len);
+    // left real scores
+    for &b in &qual[..left] {
+        row.push(score_str(b, offset));
+    }
+    // padding
+    for _ in 0..pad_count {
+        row.push("-1".to_string());
+    }
+    // right real scores
+    for &b in &qual[left..] {
+        row.push(score_str(b, offset));
+    }
+    row
+}
+
+fn write_row(
+    wtr: &mut csv::Writer<BufWriter<File>>,
+    mut row: Vec<String>,
+    label: usize,
+) -> Result<()> {
+    row.push(label.to_string());
+    wtr.write_record(&row).map_err(anyhow::Error::from)
+}
+
+fn strict_score_iter(
     path: &str,
     read_len: usize,
     offset: u8,
-    prefix_lines: Option<Vec<String>>,
+    prefix: Option<Vec<String>>,
 ) -> Result<impl Iterator<Item = Vec<String>>> {
-    let file = File::open(path).with_context(|| format!("Cannot open file: {}", path))?;
+    let file = File::open(path).with_context(|| format!("Cannot open: {}", path))?;
     let file_lines = BufReader::new(file).lines();
-
     let all_lines: Box<dyn Iterator<Item = Result<String, std::io::Error>>> =
-        if let Some(prefix) = prefix_lines {
-            let prefix_iter = prefix.into_iter().map(|s| Ok(s));
-            Box::new(prefix_iter.chain(file_lines))
+        if let Some(pref) = prefix {
+            Box::new(pref.into_iter().map(|s| Ok(s)).chain(file_lines))
         } else {
             Box::new(file_lines)
         };
-
-    let iter = all_lines.filter_map(move |r| {
-        r.ok()
-            .and_then(|line| valid_sam_line(&line, read_len).map(|b| scores_to_strings(b, offset)))
-    });
-    Ok(iter)
+    Ok(all_lines.filter_map(move |r| {
+        r.ok().and_then(|line| {
+            valid_sam_line_strict(&line, read_len)
+                .map(|qual| qual.iter().map(|&b| score_str(b, offset)).collect())
+        })
+    }))
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let l = args.length;
 
     if args.files.is_empty() {
         bail!("At least one input file is required");
     }
 
-    // Validate --balance if given
+    // Validate --balance
     if let Some(bal) = args.balance {
-        if bal < 1 {
-            bail!("--balance must be at least 1");
-        }
-        if bal > args.files.len() {
+        if bal < 1 || bal > args.files.len() {
             bail!(
                 "Balance reference index {} is out of range (1..{})",
                 bal,
@@ -155,12 +192,15 @@ fn main() -> Result<()> {
             );
         }
     }
+    let balance_idx = args.balance.map(|n| n - 1);
 
-    // Phred offset detection
-    let first_file = &args.files[0];
-    let file = File::open(first_file)
-        .with_context(|| format!("Cannot open first file for detection: {}", first_file))?;
+    // Open first file for Phred detection
+    let first_path = &args.files[0];
+    let file = File::open(first_path)
+        .with_context(|| format!("Cannot open first file: {}", first_path))?;
     let mut reader = BufReader::new(file);
+
+    // Read detection lines
     let mut detection_buffer: Vec<String> = Vec::new();
     let mut qual_samples: Vec<String> = Vec::new();
     for _ in 0..args.detect_encoding {
@@ -170,12 +210,21 @@ fn main() -> Result<()> {
         }
         detection_buffer.push(line);
     }
-    for line in &detection_buffer {
-        if let Some(qual_bytes) = valid_sam_line(line, l) {
-            qual_samples.push(std::str::from_utf8(qual_bytes).unwrap().to_string());
+    if args.length > 0 {
+        // Strict length: collect quality samples for detection
+        for line in &detection_buffer {
+            if let Some(qual_bytes) = valid_sam_line_strict(line, args.length) {
+                qual_samples.push(std::str::from_utf8(qual_bytes).unwrap().to_string());
+            }
+        }
+    } else {
+        // Padding mode: no length filtering for detection
+        for line in &detection_buffer {
+            if let Some((_len, qual_bytes)) = valid_sam_line_padding(line) {
+                qual_samples.push(std::str::from_utf8(qual_bytes).unwrap().to_string());
+            }
         }
     }
-
     let offset = if let Some(forced) = args.phred {
         forced
     } else {
@@ -183,14 +232,18 @@ fn main() -> Result<()> {
             Some(off) => off,
             None => {
                 eprintln!(
-                    "Warning: Could not auto‑detect Phred encoding. Outputting raw ASCII values (offset 0)."
+                    "Warning: Could not auto‑detect Phred encoding. Outputting raw ASCII values (offset 0)"
                 );
                 0
             }
         }
     };
 
-    // Output CSV setup
+    // Determine output mode
+    let padding_mode = args.length == 0;
+    let effective_max_len = if padding_mode { 0 } else { args.length };
+
+    // Prepare output CSV writer
     let out_file = File::create(&args.output)
         .with_context(|| format!("Cannot create output file: {}", args.output))?;
     let buf_out = BufWriter::new(out_file);
@@ -199,70 +252,178 @@ fn main() -> Result<()> {
         .delimiter(b',')
         .from_writer(buf_out);
 
-    let mut header: Vec<String> = (1..=l).map(|i| i.to_string()).collect();
-    header.push("label".to_string());
-    wtr.write_record(&header)?;
-
     let mut rng = ChaCha8Rng::seed_from_u64(args.seed);
 
-    // Map --balance to 0‑based index
-    let balance_idx = args.balance.map(|n| n - 1);
-
-    // Helper: return prefix lines only for the first file (idx == 0)
-    let prefix_for = |idx: usize| -> Option<Vec<String>> {
-        if idx == 0 {
-            Some(detection_buffer.clone())
-        } else {
-            None
+    if padding_mode {
+        let mut first_rows: Vec<(usize, Vec<u8>)> = Vec::new(); // (seq_len, qual_bytes)
+        for line_result in detection_buffer
+            .into_iter()
+            .map(|s| Ok::<_, std::io::Error>(s))
+            .chain(reader.lines())
+        {
+            let line = line_result?;
+            if let Some((seq_len, qual)) = valid_sam_line_padding(&line) {
+                first_rows.push((seq_len, qual.to_vec()));
+            }
         }
-    };
-
-    if let Some(ref_idx) = balance_idx {
-        // Balanced mode
-        // 1. Process reference file completely, counting K
-        let ref_prefix = prefix_for(ref_idx);
-        let ref_iter = score_iterator(&args.files[ref_idx], l, offset, ref_prefix)?;
-        let mut k = 0;
-        for row in ref_iter {
-            let mut rec = row;
-            rec.push(ref_idx.to_string());
-            wtr.write_record(&rec)?;
-            k += 1;
+        if first_rows.is_empty() {
+            bail!("First file contains no valid reads");
         }
-        if k == 0 {
-            eprintln!(
-                "Reference file {} has no valid reads. Skipping other files.",
-                ref_idx + 1
-            );
-        } else {
-            // 2. For every other file, downsample to k
-            for (idx, file) in args.files.iter().enumerate() {
-                if idx == ref_idx {
-                    continue;
+        let max_len = first_rows.iter().map(|&(len, _)| len).max().unwrap();
+
+        // Write CSV header: 1..max_len, label
+        let mut header: Vec<String> = (1..=max_len).map(|i| i.to_string()).collect();
+        header.push("label".to_string());
+        wtr.write_record(&header).map_err(anyhow::Error::from)?;
+
+        match balance_idx {
+            None => {
+                // No balancing
+                for (seq_len, qual) in &first_rows {
+                    write_row(&mut wtr, pad_row(qual, *seq_len, max_len, offset), 0)?;
                 }
-                let prefix = prefix_for(idx);
-                let iter = score_iterator(file, l, offset, prefix)?;
-                let sample = reservoir_sample_iter(iter, k, &mut rng);
-                for mut row in sample {
-                    row.push(idx.to_string());
-                    wtr.write_record(&row)?;
+                for (idx, file) in args.files.iter().enumerate().skip(1) {
+                    let f =
+                        File::open(file).with_context(|| format!("Cannot open file: {}", file))?;
+                    let reader = BufReader::new(f);
+                    for line in reader.lines() {
+                        let line = line?;
+                        if let Some((seq_len, qual)) = valid_sam_line_padding(&line) {
+                            write_row(&mut wtr, pad_row(qual, seq_len, max_len, offset), idx)?;
+                        }
+                    }
+                }
+            }
+            Some(ref_idx) => {
+                if ref_idx == 0 {
+                    let k = first_rows.len();
+                    for (seq_len, qual) in &first_rows {
+                        write_row(&mut wtr, pad_row(qual, *seq_len, max_len, offset), 0)?;
+                    }
+                    for (idx, file) in args.files.iter().enumerate().skip(1) {
+                        let f = File::open(file).context("Cannot open file")?;
+                        let reader = BufReader::new(f);
+                        let iter = reader.lines().filter_map(|r| {
+                            r.ok().and_then(|line| {
+                                valid_sam_line_padding(&line)
+                                    .map(|(seq_len, qual)| pad_row(&qual, seq_len, max_len, offset))
+                            })
+                        });
+                        let sample = reservoir_sample_iter(iter, k, &mut rng);
+                        for row in sample {
+                            write_row(&mut wtr, row, idx)?;
+                        }
+                    }
+                } else {
+                    // 1. Process reference file completely, write rows, count k
+                    let ref_file = &args.files[ref_idx];
+                    let f = File::open(ref_file).context("Cannot open reference file")?;
+                    let reader = BufReader::new(f);
+                    let mut k = 0usize;
+                    for line in reader.lines() {
+                        let line = line?;
+                        if let Some((seq_len, qual)) = valid_sam_line_padding(&line) {
+                            write_row(&mut wtr, pad_row(&qual, seq_len, max_len, offset), ref_idx)?;
+                            k += 1;
+                        }
+                    }
+                    if k == 0 {
+                        eprintln!(
+                            "Reference file {} has no valid reads. Skipping other files.",
+                            ref_idx + 1
+                        );
+                    } else {
+                        // 2. Downsample first file (in memory)
+                        let first_iter = first_rows
+                            .iter()
+                            .map(|(seq_len, qual)| pad_row(qual, *seq_len, max_len, offset));
+                        let sample = reservoir_sample_iter(first_iter, k, &mut rng);
+                        for row in sample {
+                            write_row(&mut wtr, row, 0)?;
+                        }
+                        // 3. Downsample other files (excluding ref_idx and 0)
+                        for idx in 0..args.files.len() {
+                            if idx == 0 || idx == ref_idx {
+                                continue;
+                            }
+                            let file = &args.files[idx];
+                            let f = File::open(file).context("Cannot open file")?;
+                            let reader = BufReader::new(f);
+                            let iter = reader.lines().filter_map(|r| {
+                                r.ok().and_then(|line| {
+                                    valid_sam_line_padding(&line).map(|(seq_len, qual)| {
+                                        pad_row(&qual, seq_len, max_len, offset)
+                                    })
+                                })
+                            });
+                            let sample = reservoir_sample_iter(iter, k, &mut rng);
+                            for row in sample {
+                                write_row(&mut wtr, row, idx)?;
+                            }
+                        }
+                    }
                 }
             }
         }
     } else {
-        // No balancing
-        for (idx, file) in args.files.iter().enumerate() {
-            let prefix = prefix_for(idx);
-            let iter = score_iterator(file, l, offset, prefix)?;
-            for row in iter {
-                let mut rec = row;
-                rec.push(idx.to_string());
-                wtr.write_record(&rec)?;
+        let l = args.length;
+        let detection_prefix_detectionbuf = detection_buffer.clone();
+
+        let prefix_for = |idx: usize| -> Option<Vec<String>> {
+            if idx == 0 {
+                Some(detection_prefix_detectionbuf.clone())
+            } else {
+                None
+            }
+        };
+
+        // Write CSV header
+        let mut header: Vec<String> = (1..=l).map(|i| i.to_string()).collect();
+        header.push("label".to_string());
+        wtr.write_record(&header).map_err(anyhow::Error::from)?;
+
+        match balance_idx {
+            None => {
+                for (idx, file) in args.files.iter().enumerate() {
+                    let prefix = prefix_for(idx);
+                    let iter = strict_score_iter(file, l, offset, prefix)?;
+                    for row in iter {
+                        write_row(&mut wtr, row, idx)?;
+                    }
+                }
+            }
+            Some(ref_idx) => {
+                // Process reference file completely, counting k
+                let ref_prefix = prefix_for(ref_idx);
+                let ref_iter = strict_score_iter(&args.files[ref_idx], l, offset, ref_prefix)?;
+                let mut k = 0;
+                for row in ref_iter {
+                    write_row(&mut wtr, row, ref_idx)?;
+                    k += 1;
+                }
+                if k == 0 {
+                    eprintln!(
+                        "Reference file {} has no valid reads. Skipping others.",
+                        ref_idx + 1
+                    );
+                } else {
+                    for (idx, file) in args.files.iter().enumerate() {
+                        if idx == ref_idx {
+                            continue;
+                        }
+                        let prefix = prefix_for(idx);
+                        let iter = strict_score_iter(file, l, offset, prefix)?;
+                        let sample = reservoir_sample_iter(iter, k, &mut rng);
+                        for row in sample {
+                            write_row(&mut wtr, row, idx)?;
+                        }
+                    }
+                }
             }
         }
     }
 
-    wtr.flush()?;
+    wtr.flush().map_err(anyhow::Error::from)?;
     eprintln!("Quality scores written to {}", args.output);
     Ok(())
 }
