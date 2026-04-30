@@ -3,4 +3,8 @@ update author & versioning for each tool
 
 
 ==================================================
+src/bin/dimer_count.rs
+  line 21     TODO   add a sample flag similar to extract quality
+src/bin/extract_quality.rs
+  line 14     TODO   add a sample flag that interacts with balance as well
 ==================================================

@@ -11,6 +11,7 @@ use gattaca::reservoir_sample_iter;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// TODO: add a sample flag that interacts with balance as well
 #[derive(Parser)]
 #[command(
     author,
