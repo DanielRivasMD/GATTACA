@@ -10,16 +10,20 @@ description = ""
 edition = "2024"
 
 [[bin]]
-name = "extract_quality"
-path = "src/bin/extract_quality.rs"
+name = "quality_extract"
+path = "src/bin/quality_extract.rs"
 
 [[bin]]
 name = "dimer_count"
 path = "src/bin/dimer_count.rs"
 
 [[bin]]
-name = "read_len"
-path = "src/bin/read_len.rs"
+name = "position_composition"
+path = "src/bin/position_composition.rs"
+
+[[bin]]
+name = "read_distribution"
+path = "src/bin/read_distribution.rs"
 
 [dependencies]
 anyhow = "1.0"
