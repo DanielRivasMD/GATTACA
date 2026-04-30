@@ -1,5 +1,8 @@
 update author & versioning for each tool
 
+refactor binaries into one tool
+accept fasta files for all tools
+
 
 
 ==================================================
